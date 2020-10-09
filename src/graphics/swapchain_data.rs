@@ -1,3 +1,5 @@
+use core::mem::ManuallyDrop;
+
 use gfx_hal::{
     device::Device as DeviceTrait,
     image::Extent,
@@ -5,11 +7,13 @@ use gfx_hal::{
     Backend,
 };
 
+use crate::error::{Error, ErrorKind};
+
 use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct SwapchainData<B: Backend> {
-    pub device: Rc<B::Device>,
+    pub device: Rc<ManuallyDrop<B::Device>>,
     pub swapchain: B::Swapchain,
     pub backbuffer: Vec<B::Image>,
     pub config: SwapchainConfig,
@@ -24,7 +28,7 @@ pub struct SwapchainData<B: Backend> {
 impl<B: Backend> SwapchainData<B> {
     #![allow(clippy::too_many_arguments)]
     pub fn from(
-        device: Rc<B::Device>,
+        device: Rc<ManuallyDrop<B::Device>>,
         swapchain: B::Swapchain,
         backbuffer: Vec<B::Image>,
         config: SwapchainConfig,
@@ -48,15 +52,28 @@ impl<B: Backend> SwapchainData<B> {
         }
     }
 
-    pub unsafe fn get_current_image(&mut self) -> Result<(u32, usize), &'static str> {
+    pub unsafe fn get_current_image(&mut self) -> Result<(u32, usize), Error> {
         let (image_index, _check_if_you_need_this) = self
             .swapchain
             .acquire_image(
                 u64::max_value(),
-                Some(&self.available_semaphores.as_ref().ok_or("fail")?[self.current_frame]),
-                Some(&self.fences.as_ref().ok_or("")?[self.current_frame]),
+                Some(
+                    &self.available_semaphores.as_ref().ok_or(Error {
+                        description: "failed to get semaphores".to_string(),
+                        error_kind: ErrorKind::SemaphoreError,
+                    })?[self.current_frame],
+                ),
+                Some(
+                    &self.fences.as_ref().ok_or(Error {
+                        description: "failed to get fences".to_string(),
+                        error_kind: ErrorKind::FenceError,
+                    })?[self.current_frame],
+                ),
             )
-            .map_err(|_| "Couldn't acquire an image from the swapchain!")?;
+            .map_err(|e| Error {
+                description: format!("Couldn't acquire an image from the swapchain! ({})", e),
+                error_kind: ErrorKind::SwapchainError,
+            })?;
         Ok((image_index, image_index as usize))
     }
 
@@ -64,11 +81,14 @@ impl<B: Backend> SwapchainData<B> {
         &mut self,
         device: &B::Device,
         render_pass: &B::RenderPass,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), Error> {
         self.framebuffers = self
             .image_views
             .as_ref()
-            .ok_or("No image views on this swapchain")?
+            .ok_or(Error {
+                description: "No image views on this swapchain".to_string(),
+                error_kind: ErrorKind::SwapchainError,
+            })?
             .iter()
             .map(|image_view| {
                 device
@@ -81,9 +101,12 @@ impl<B: Backend> SwapchainData<B> {
                             depth: 1,
                         },
                     )
-                    .map_err(|_| "Failed to create a framebuffer!")
+                    .map_err(|e| Error {
+                        description: format!("Failed to create a framebuffer! ({})", e),
+                        error_kind: ErrorKind::FramebufferCreationError,
+                    })
             })
-            .collect::<Result<Vec<_>, &str>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
         Ok(())
     }
 

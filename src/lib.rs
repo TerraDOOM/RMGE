@@ -7,6 +7,7 @@ use gfx_backend_vulkan as back;
 #[cfg(feature = "default")]
 use gfx_backend_vulkan as back;
 
+pub mod error;
 pub mod graphics;
 
 pub type Renderer = graphics::Context<back::Backend>;

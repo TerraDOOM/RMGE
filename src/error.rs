@@ -1,6 +1,24 @@
+#[derive(Debug)]
 pub struct Error {
-    description: String,
-    error_kind: ErrorKind,
+    pub description: String,
+    pub error_kind: ErrorKind,
 }
 
-pub enum ErrorKind {}
+#[derive(Debug)]
+pub enum ErrorKind {
+    InstanceCreationError,
+    SurfaceCreationError,
+    QueueGroupError,
+    DeviceNotFoundError,
+    SwapchainCreationError,
+    CommandPoolCreationError,
+    FenceCreationError,
+    SemaphoreCreationError,
+    RenderPassCreationError,
+    ImageViewCreationError,
+    FramebufferCreationError,
+    FenceError,
+    SemaphoreError,
+    SubmissionError,
+    SwapchainError,
+}

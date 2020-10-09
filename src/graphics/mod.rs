@@ -46,6 +46,7 @@ use device_data::DeviceData;
 use swapchain_data::SwapchainData;
 
 use core::mem::ManuallyDrop;
+use std::rc::Rc;
 
 use gfx_hal::{
     adapter::{Adapter, Gpu, PhysicalDevice},
@@ -59,18 +60,48 @@ use gfx_hal::{
 
 use raw_window_handle::HasRawWindowHandle;
 
+use crate::error::{Error, ErrorKind};
+
+#[derive(Debug)]
+struct CommandData<B: Backend> {
+    device: Rc<ManuallyDrop<B::Device>>,
+    command_pool: B::CommandPool,
+    command_buffers: Vec<B::CommandBuffer>,
+}
+
+impl<B: Backend> CommandData<B> {
+    unsafe fn new(device_data: &mut DeviceData<B>) -> Result<Self, Error> {
+        let mut command_pool = device_data
+            .device
+            .create_command_pool(
+                device_data.queue.family,
+                CommandPoolCreateFlags::RESET_INDIVIDUAL,
+            )
+            .map_err(|e| Error {
+                description: format!("{}", e),
+                error_kind: ErrorKind::CommandPoolCreationError,
+            })?;
+        let command_buffers = device_data.create_command_buffers(&mut command_pool);
+
+        Ok(CommandData {
+            device: device_data.device.clone(),
+            command_pool,
+            command_buffers,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Context<B: Backend> {
     instance: ManuallyDrop<B::Instance>,
     surface: B::Surface,
     adapters: Vec<Adapter<B>>,
     devices: Vec<DeviceData<B>>,
-    command_pools: Vec<B::CommandPool>,
-    command_buffers: Vec<B::CommandBuffer>,
+    command_pools: Vec<CommandData<B>>,
 }
 
 impl<B: Backend> Context<B> {
-    pub fn build<W: HasRawWindowHandle>(window: &W, name: &str) -> Result<Self, &'static str> {
+    pub fn build<W: HasRawWindowHandle>(window: &W, name: &str) -> Result<Self, Error> {
         let mut context = Self::from_window(window, name)?;
         context.add_device()?;
         context.add_swapchain(0)?;
@@ -78,34 +109,22 @@ impl<B: Backend> Context<B> {
         context.devices[0].add_render_pass()?;
         context.devices[0].add_image_views(0)?;
         context.devices[0].add_framebuffers(0, 0)?;
-
-        context.command_pools.push(unsafe {
-            context.devices[0]
-                .device
-                .create_command_pool(
-                    context.devices[0].queue.family,
-                    CommandPoolCreateFlags::RESET_INDIVIDUAL,
-                )
-                .map_err(|_| "Could not create the raw command pool!")?
-        });
-
-        context.command_buffers =
-            context.devices[0].create_command_buffers(&mut context.command_pools[0]);
+        context.add_command_pool(0)?;
 
         Ok(context)
     }
 
-    pub fn from_window<W: HasRawWindowHandle>(
-        window: &W,
-        name: &str,
-    ) -> Result<Self, &'static str> {
-        let raw_instance =
-            B::Instance::create(name, 1).map_err(|_| "failed to create the instance")?;
+    pub fn from_window<W: HasRawWindowHandle>(window: &W, name: &str) -> Result<Self, Error> {
+        let raw_instance = B::Instance::create(name, 1).map_err(|e| Error {
+            description: format!("{:?}", e),
+            error_kind: ErrorKind::InstanceCreationError,
+        })?;
 
         let surface = unsafe {
-            raw_instance
-                .create_surface(window)
-                .map_err(|_| "failed to create the surface")?
+            raw_instance.create_surface(window).map_err(|e| Error {
+                description: format!("{:?}", e),
+                error_kind: ErrorKind::SurfaceCreationError,
+            })?
         };
 
         let adapters = raw_instance
@@ -130,11 +149,10 @@ impl<B: Backend> Context<B> {
             adapters,
             devices: vec![],
             command_pools: vec![],
-            command_buffers: vec![],
         })
     }
 
-    fn add_device(&mut self) -> Result<(), &'static str> {
+    fn add_device(&mut self) -> Result<(), Error> {
         let (
             index,
             Gpu {
@@ -154,15 +172,22 @@ impl<B: Backend> Context<B> {
                         .map(|gpu| (index, gpu, qf))
                 })
             })
-            .ok_or("Failed to find a working queue or something")?;
+            .ok_or(Error {
+                description: "Failed to find a working queue or something".to_string(),
+                error_kind: ErrorKind::QueueGroupError,
+            })?;
+
         // TODO: Make this good
-        let queue_group = queue_groups
-            .into_iter()
-            .next()
-            .ok_or("Couldn't take ownership of the QueueGroup")?;
+        let queue_group = queue_groups.into_iter().next().ok_or(Error {
+            description: "Couldn't take ownership of the QueueGroup".to_string(),
+            error_kind: ErrorKind::QueueGroupError,
+        })?;
 
         if queue_group.queues.is_empty() {
-            return Err("The QueueGroup did not have any CommandQueues available!");
+            return Err(Error {
+                description: "The QueueGroup did not have any CommandQueues available!".to_string(),
+                error_kind: ErrorKind::QueueGroupError,
+            });
         };
 
         self.devices
@@ -171,15 +196,15 @@ impl<B: Backend> Context<B> {
         Ok(())
     }
 
-    fn add_swapchain(&mut self, device_index: usize) -> Result<(), &'static str> {
+    fn add_swapchain(&mut self, device_index: usize) -> Result<(), Error> {
         let DeviceData {
             adapter_index,
             device,
             ..
-        } = self
-            .devices
-            .get(device_index)
-            .ok_or("Failed to get device")?;
+        } = self.devices.get(device_index).ok_or(Error {
+            description: "Failed to get device".to_string(),
+            error_kind: ErrorKind::DeviceNotFoundError,
+        })?;
 
         let surface_capabilities = self
             .surface
@@ -197,7 +222,10 @@ impl<B: Backend> Context<B> {
             ]
             .iter()
             .find(|pm| present_modes.contains(**pm))
-            .ok_or("No PresentMode values specified!")?
+            .ok_or(Error {
+                description: "No PresentMode values specified!".to_string(),
+                error_kind: ErrorKind::SwapchainCreationError,
+            })?
         };
 
         let preferred_formats = self
@@ -212,10 +240,10 @@ impl<B: Backend> Context<B> {
                 .cloned()
             {
                 Some(srgb_format) => srgb_format,
-                None => formats
-                    .get(0)
-                    .cloned()
-                    .ok_or("Preferred format list was empty!")?,
+                None => formats.get(0).cloned().ok_or(Error {
+                    description: "Preferred format list was empty!".to_string(),
+                    error_kind: ErrorKind::SwapchainCreationError,
+                })?,
             },
         };
 
@@ -229,7 +257,10 @@ impl<B: Backend> Context<B> {
         let (swapchain, backbuffer) = unsafe {
             device
                 .create_swapchain(&mut self.surface, swapchain_config.clone(), None)
-                .map_err(|_| "Failed to create the swapchain!")?
+                .map_err(|e| Error {
+                    description: format!("Failed to create the swapchain! ({})", e),
+                    error_kind: ErrorKind::SwapchainCreationError,
+                })?
         };
         let device = self.devices[0].device.clone();
 
@@ -247,18 +278,111 @@ impl<B: Backend> Context<B> {
         Ok(())
     }
 
-    fn add_semaphores(
-        &mut self,
-        device_index: usize,
-        swapchain_index: usize,
-    ) -> Result<(), &'static str> {
+    fn add_semaphores(&mut self, device_index: usize, swapchain_index: usize) -> Result<(), Error> {
         self.devices
             .get_mut(device_index)
-            .ok_or("No device with this index")?
+            .ok_or(Error {
+                description: "No device with this index".to_string(),
+                error_kind: ErrorKind::DeviceNotFoundError,
+            })?
             .add_semaphores(swapchain_index)
     }
 
-    pub fn clear(&mut self, color: [f32; 4]) -> Result<(), &'static str> {
-        self.devices[0].clear_frame(color, &mut self.command_buffers)
+    fn add_command_pool(&mut self, device_index: usize) -> Result<(), Error> {
+        unsafe {
+            self.command_pools
+                .push(CommandData::new(&mut self.devices[device_index])?);
+        }
+        Ok(())
+    }
+
+    pub fn clear(&mut self, color: [f32; 4]) -> Result<(), Error> {
+        self.devices[0].clear_frame(color, &mut self.command_pools[0].command_buffers)
+    }
+}
+
+impl<B: Backend> std::ops::Drop for Context<B> {
+    fn drop(&mut self) {
+        // we drop the result since an error here would be quite unrecoverable
+        // we can't really return an error message
+
+        for device_data in &self.devices {
+            let _ = device_data.device.wait_idle();
+        }
+
+        for command_data in self.command_pools.drain(..) {
+            unsafe {
+                command_data
+                    .device
+                    .destroy_command_pool(command_data.command_pool);
+            }
+        }
+
+        for DeviceData {
+            device,
+            swapchains,
+            render_passes,
+            queue: _,
+            adapter_index: _,
+        } in self.devices.drain(..)
+        {
+            for render_pass in render_passes {
+                unsafe { device.destroy_render_pass(render_pass) };
+            }
+
+            for swapchain_data in swapchains {
+                let SwapchainData {
+                    swapchain,
+                    backbuffer,
+                    fences,
+                    available_semaphores,
+                    finished_semaphores,
+                    image_views,
+                    framebuffers,
+                    device: _, // we already have the correct device (hopefully)
+                    config: _,
+                    current_frame: _,
+                } = swapchain_data;
+                unsafe {
+                    for fence in fences.unwrap_or_else(Vec::new) {
+                        device.destroy_fence(fence);
+                    }
+
+                    for semaphore in available_semaphores.unwrap_or_else(Vec::new) {
+                        device.destroy_semaphore(semaphore);
+                    }
+
+                    for semaphore in finished_semaphores.unwrap_or_else(Vec::new) {
+                        device.destroy_semaphore(semaphore);
+                    }
+
+                    for image_view in image_views.unwrap_or_else(Vec::new) {
+                        device.destroy_image_view(image_view);
+                    }
+
+                    for image in backbuffer {
+                        device.destroy_image(image);
+                    }
+
+                    for framebuffer in framebuffers {
+                        device.destroy_framebuffer(framebuffer);
+                    }
+
+                    device.destroy_swapchain(swapchain);
+                }
+            }
+
+            match Rc::try_unwrap(device) {
+                Ok(mut dev) => unsafe { ManuallyDrop::drop(&mut dev) },
+                Err(_) => {
+                    use std::io::Write;
+                    // if this fails then everything is probably failing anyway
+                    let _ = writeln!(std::io::stderr(), "There were still alive `Rc`s to device!");
+                }
+            }
+        }
+        unsafe {
+            ManuallyDrop::drop(&mut self.instance);
+        }
     }
 }
