@@ -40,6 +40,7 @@
 )]
 
 mod device_data;
+mod resources;
 mod swapchain_data;
 
 use device_data::DeviceData;
@@ -60,7 +61,7 @@ use gfx_hal::{
 
 use raw_window_handle::HasRawWindowHandle;
 
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
 
 #[derive(Debug)]
 struct CommandData<B: Backend> {
@@ -77,10 +78,7 @@ impl<B: Backend> CommandData<B> {
                 device_data.queue.family,
                 CommandPoolCreateFlags::RESET_INDIVIDUAL,
             )
-            .map_err(|e| Error {
-                description: format!("{}", e),
-                error_kind: ErrorKind::CommandPoolCreationError,
-            })?;
+            .map_err(|_| Error::CommandPoolCreationError)?;
         let command_buffers = device_data.create_command_buffers(&mut command_pool);
 
         Ok(CommandData {
@@ -115,16 +113,13 @@ impl<B: Backend> Context<B> {
     }
 
     pub fn from_window<W: HasRawWindowHandle>(window: &W, name: &str) -> Result<Self, Error> {
-        let raw_instance = B::Instance::create(name, 1).map_err(|e| Error {
-            description: format!("{:?}", e),
-            error_kind: ErrorKind::InstanceCreationError,
-        })?;
+        let raw_instance =
+            B::Instance::create(name, 1).map_err(|e| Error::InstanceCreationError(e))?;
 
         let surface = unsafe {
-            raw_instance.create_surface(window).map_err(|e| Error {
-                description: format!("{:?}", e),
-                error_kind: ErrorKind::SurfaceCreationError,
-            })?
+            raw_instance
+                .create_surface(window)
+                .map_err(|e| Error::SurfaceCreationError(e))?
         };
 
         let adapters = raw_instance
@@ -153,6 +148,8 @@ impl<B: Backend> Context<B> {
     }
 
     fn add_device(&mut self) -> Result<(), Error> {
+        use crate::error::QueueGroupError;
+
         let (
             index,
             Gpu {
@@ -172,22 +169,16 @@ impl<B: Backend> Context<B> {
                         .map(|gpu| (index, gpu, qf))
                 })
             })
-            .ok_or(Error {
-                description: "Failed to find a working queue or something".to_string(),
-                error_kind: ErrorKind::QueueGroupError,
-            })?;
+            .ok_or(Error::QueueGroupError(QueueGroupError::QueueGroupNotFound))?;
 
         // TODO: Make this good
-        let queue_group = queue_groups.into_iter().next().ok_or(Error {
-            description: "Couldn't take ownership of the QueueGroup".to_string(),
-            error_kind: ErrorKind::QueueGroupError,
-        })?;
+        let queue_group = queue_groups
+            .into_iter()
+            .next()
+            .ok_or(Error::QueueGroupError(QueueGroupError::OwnershipFailed))?;
 
         if queue_group.queues.is_empty() {
-            return Err(Error {
-                description: "The QueueGroup did not have any CommandQueues available!".to_string(),
-                error_kind: ErrorKind::QueueGroupError,
-            });
+            return Err(Error::QueueGroupError(QueueGroupError::NoCommandQueues));
         };
 
         self.devices
@@ -201,10 +192,10 @@ impl<B: Backend> Context<B> {
             adapter_index,
             device,
             ..
-        } = self.devices.get(device_index).ok_or(Error {
-            description: "Failed to get device".to_string(),
-            error_kind: ErrorKind::DeviceNotFoundError,
-        })?;
+        } = self
+            .devices
+            .get(device_index)
+            .ok_or(Error::DeviceNotFoundError(device_index))?;
 
         let surface_capabilities = self
             .surface
@@ -222,10 +213,9 @@ impl<B: Backend> Context<B> {
             ]
             .iter()
             .find(|pm| present_modes.contains(**pm))
-            .ok_or(Error {
-                description: "No PresentMode values specified!".to_string(),
-                error_kind: ErrorKind::SwapchainCreationError,
-            })?
+            .ok_or(Error::SwapchainError(
+                crate::error::SwapchainError::NoPresentMode,
+            ))?
         };
 
         let preferred_formats = self
@@ -240,10 +230,9 @@ impl<B: Backend> Context<B> {
                 .cloned()
             {
                 Some(srgb_format) => srgb_format,
-                None => formats.get(0).cloned().ok_or(Error {
-                    description: "Preferred format list was empty!".to_string(),
-                    error_kind: ErrorKind::SwapchainCreationError,
-                })?,
+                None => formats.get(0).cloned().ok_or(Error::SwapchainError(
+                    crate::error::SwapchainError::NoPresentMode,
+                ))?,
             },
         };
 
@@ -257,9 +246,8 @@ impl<B: Backend> Context<B> {
         let (swapchain, backbuffer) = unsafe {
             device
                 .create_swapchain(&mut self.surface, swapchain_config.clone(), None)
-                .map_err(|e| Error {
-                    description: format!("Failed to create the swapchain! ({})", e),
-                    error_kind: ErrorKind::SwapchainCreationError,
+                .map_err(|e| {
+                    Error::SwapchainError(crate::error::SwapchainError::CreationError(e))
                 })?
         };
         let device = self.devices[0].device.clone();
@@ -281,10 +269,7 @@ impl<B: Backend> Context<B> {
     fn add_semaphores(&mut self, device_index: usize, swapchain_index: usize) -> Result<(), Error> {
         self.devices
             .get_mut(device_index)
-            .ok_or(Error {
-                description: "No device with this index".to_string(),
-                error_kind: ErrorKind::DeviceNotFoundError,
-            })?
+            .ok_or(Error::DeviceNotFoundError(device_index))?
             .add_semaphores(swapchain_index)
     }
 

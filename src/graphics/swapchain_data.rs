@@ -7,7 +7,7 @@ use gfx_hal::{
     Backend,
 };
 
-use crate::error::{Error, ErrorKind};
+use crate::error::Error;
 
 use std::rc::Rc;
 
@@ -58,22 +58,20 @@ impl<B: Backend> SwapchainData<B> {
             .acquire_image(
                 u64::max_value(),
                 Some(
-                    &self.available_semaphores.as_ref().ok_or(Error {
-                        description: "failed to get semaphores".to_string(),
-                        error_kind: ErrorKind::SemaphoreError,
-                    })?[self.current_frame],
+                    &self
+                        .available_semaphores
+                        .as_ref()
+                        .ok_or(Error::SemaphoreError)?[self.current_frame],
                 ),
                 Some(
-                    &self.fences.as_ref().ok_or(Error {
-                        description: "failed to get fences".to_string(),
-                        error_kind: ErrorKind::FenceError,
-                    })?[self.current_frame],
+                    &self
+                        .fences
+                        .as_ref()
+                        .ok_or(Error::FenceError(crate::error::FenceOp::Acquire))?
+                        [self.current_frame],
                 ),
             )
-            .map_err(|e| Error {
-                description: format!("Couldn't acquire an image from the swapchain! ({})", e),
-                error_kind: ErrorKind::SwapchainError,
-            })?;
+            .map_err(|e| Error::SwapchainError(crate::error::SwapchainError::ImageAcquireError))?;
         Ok((image_index, image_index as usize))
     }
 
@@ -85,10 +83,9 @@ impl<B: Backend> SwapchainData<B> {
         self.framebuffers = self
             .image_views
             .as_ref()
-            .ok_or(Error {
-                description: "No image views on this swapchain".to_string(),
-                error_kind: ErrorKind::SwapchainError,
-            })?
+            .ok_or(Error::SwapchainError(
+                crate::error::SwapchainError::NoImageViews,
+            ))?
             .iter()
             .map(|image_view| {
                 device
@@ -101,10 +98,7 @@ impl<B: Backend> SwapchainData<B> {
                             depth: 1,
                         },
                     )
-                    .map_err(|e| Error {
-                        description: format!("Failed to create a framebuffer! ({})", e),
-                        error_kind: ErrorKind::FramebufferCreationError,
-                    })
+                    .map_err(|e| Error::FramebufferCreationError)
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(())

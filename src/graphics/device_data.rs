@@ -17,7 +17,7 @@ use gfx_hal::{
 };
 
 use super::swapchain_data::SwapchainData;
-use crate::error::{Error, ErrorKind};
+use crate::error::*;
 
 use arrayvec::ArrayVec;
 use std::rc::Rc;
@@ -48,30 +48,27 @@ impl<B: Backend> DeviceData<B> {
         self.swapchains[swapchain_index].fences = Some(
             (0..image_count)
                 .map(|_| {
-                    device.create_fence(true).map_err(|e| Error {
-                        description: format!("{}", e),
-                        error_kind: ErrorKind::FenceCreationError,
-                    })
+                    device
+                        .create_fence(true)
+                        .map_err(|e| Error::FenceCreationError)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
         self.swapchains[swapchain_index].available_semaphores = Some(
             (0..image_count)
                 .map(|_| {
-                    device.create_semaphore().map_err(|e| Error {
-                        description: format!("{}", e),
-                        error_kind: ErrorKind::SemaphoreCreationError,
-                    })
+                    device
+                        .create_semaphore()
+                        .map_err(|e| Error::SemaphoreCreationError)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
         self.swapchains[swapchain_index].finished_semaphores = Some(
             (0..image_count)
                 .map(|_| {
-                    device.create_semaphore().map_err(|e| Error {
-                        description: format!("{}", e),
-                        error_kind: ErrorKind::SemaphoreCreationError,
-                    })
+                    device
+                        .create_semaphore()
+                        .map_err(|e| Error::SemaphoreCreationError)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -100,10 +97,7 @@ impl<B: Backend> DeviceData<B> {
             unsafe {
                 self.device
                     .create_render_pass(&[color_attachment], &[subpass], &[])
-                    .map_err(|e| Error {
-                        description: format!("{}", e),
-                        error_kind: ErrorKind::RenderPassCreationError,
-                    })?
+                    .map_err(|e| Error::RenderPassCreationError)?
             }
         });
         Ok(())
@@ -127,10 +121,7 @@ impl<B: Backend> DeviceData<B> {
                                 layers: 0..1,
                             },
                         )
-                        .map_err(|e| Error {
-                            description: format!("{}", e),
-                            error_kind: ErrorKind::ImageViewCreationError,
-                        })
+                        .map_err(|e| Error::ImageViewCreationError)
                 })
                 .collect::<Result<Vec<_>, Error>>()?,
         );
@@ -168,30 +159,20 @@ impl<B: Backend> DeviceData<B> {
                     &self.swapchains[swapchain_index]
                         .fences
                         .as_ref()
-                        .ok_or(Error {
-                            description: "Could not get fence".to_string(),
-                            error_kind: ErrorKind::FenceError,
-                        })?[self.swapchains[swapchain_index].current_frame],
+                        .ok_or(Error::FenceError(FenceOp::Acquire))?
+                        [self.swapchains[swapchain_index].current_frame],
                     u64::max_value(),
                 )
-                .map_err(|e| Error {
-                    description: format!("Failed to wait on the fence! ({})", e),
-                    error_kind: ErrorKind::FenceError,
-                })?;
+                .map_err(|e| Error::FenceError(FenceOp::Wait))?;
             self.device
                 .reset_fence(
                     &self.swapchains[swapchain_index]
                         .fences
                         .as_ref()
-                        .ok_or(Error {
-                            description: "Could not get fence".to_string(),
-                            error_kind: ErrorKind::FenceError,
-                        })?[self.swapchains[swapchain_index].current_frame],
+                        .ok_or(Error::FenceError(FenceOp::Acquire))?
+                        [self.swapchains[swapchain_index].current_frame],
                 )
-                .map_err(|e| Error {
-                    description: format!("Couldn't reset the fence! ({})", e),
-                    error_kind: ErrorKind::FenceError,
-                })?;
+                .map_err(|e| Error::FenceError(FenceOp::Reset))?;
         }
         Ok(())
     }
@@ -232,10 +213,7 @@ impl<B: Backend> DeviceData<B> {
             &self.swapchains[0]
                 .available_semaphores
                 .as_ref()
-                .ok_or(Error {
-                    description: "couldn't get semaphores".to_string(),
-                    error_kind: ErrorKind::SubmissionError,
-                })?[self.swapchains[0].current_frame],
+                .ok_or(Error::SubmissionError)?[self.swapchains[0].current_frame],
             PipelineStage::COLOR_ATTACHMENT_OUTPUT,
         )]
         .into();
@@ -243,19 +221,13 @@ impl<B: Backend> DeviceData<B> {
         let signal_semaphores: ArrayVec<[_; 1]> = [&self.swapchains[0]
             .finished_semaphores
             .as_ref()
-            .ok_or(Error {
-                description: "couldn't get finished semaphores".to_string(),
-                error_kind: ErrorKind::SubmissionError,
-            })?[self.swapchains[0].current_frame]]
+            .ok_or(Error::SubmissionError)?[self.swapchains[0].current_frame]]
         .into();
         // yes, you have to write it twice like this. yes, it's silly.
         let present_wait_semaphores: ArrayVec<[_; 1]> = [&self.swapchains[0]
             .finished_semaphores
             .as_ref()
-            .ok_or(Error {
-                description: "couldn't get finished semaphores".to_string(),
-                error_kind: ErrorKind::SubmissionError,
-            })?[self.swapchains[0].current_frame]]
+            .ok_or(Error::SubmissionError)?[self.swapchains[0].current_frame]]
         .into();
 
         let submission = Submission {
@@ -270,19 +242,17 @@ impl<B: Backend> DeviceData<B> {
             the_command_queue.submit(
                 submission,
                 Some(
-                    &self.swapchains[0].fences.as_ref().ok_or(Error {
-                        description: "failed to get fences".to_string(),
-                        error_kind: ErrorKind::SubmissionError,
-                    })?[self.swapchains[0].current_frame],
+                    &self.swapchains[0]
+                        .fences
+                        .as_ref()
+                        .ok_or(Error::FenceError(FenceOp::Acquire))?
+                        [self.swapchains[0].current_frame],
                 ),
             );
             self.swapchains[0]
                 .swapchain
                 .present(the_command_queue, i_u32, present_wait_semaphores)
-                .map_err(|e| Error {
-                    description: format!("Failed to present into the swapchain! ({})", e),
-                    error_kind: ErrorKind::SubmissionError,
-                })?
+                .map_err(|e| Error::SubmissionError)?
         };
         Ok(())
     }

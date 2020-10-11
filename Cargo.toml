@@ -10,6 +10,8 @@ edition = "2018"
 arrayvec = "0.5.1"
 gfx-hal = "0.5.0"
 raw-window-handle = "0.3"
+take_mut = "0.2"
+nalgebra = "0.22"
 
 [dev-dependencies]
 shaderc = "0.6"

@@ -8,9 +8,18 @@ use gfx_backend_vulkan as back;
 use gfx_backend_vulkan as back;
 
 pub mod error;
+pub mod geometry;
 pub mod graphics;
+pub mod scene;
+pub mod tracker;
 
-pub type Renderer = graphics::Context<back::Backend>;
+use graphics::Context;
+use scene::SceneTree;
+
+pub struct Renderer {
+    context: Context<back::Backend>,
+    scenetree: SceneTree,
+}
 
 #[cfg(test)]
 mod tests {
