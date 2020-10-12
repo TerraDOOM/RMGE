@@ -10,7 +10,7 @@ use take_mut;
 /// library uses, `take_mut`, uses ptr::read, and even though this
 /// *shouldn't* change the location of the inner value, I'm not
 /// risking it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Tracked<T: Unpin> {
     Unmodified(T),
     Modified(T),
@@ -26,6 +26,10 @@ impl<T: Unpin> Tracked<T> {
     /// assert!(tracker.is_unmodified());
     /// ```
     pub fn new(x: T) -> Self {
+        Tracked::Modified(x)
+    }
+
+    pub(crate) fn new_unmodified(x: T) -> Self {
         Tracked::Unmodified(x)
     }
 
@@ -86,19 +90,17 @@ impl<T: Unpin> Tracked<T> {
         did_something
     }
 
+    pub(crate) fn mark_modified(&mut self) {
+        take_mut::take(self, |tracker| match tracker {
+            Tracked::Unmodified(inner) => Tracked::Modified(inner),
+            x => x,
+        });
+    }
+
     pub fn into_inner(self) -> T {
         match self {
             Tracked::Modified(x) => x,
             Tracked::Unmodified(x) => x,
-        }
-    }
-}
-
-impl<T: Unpin + Clone> Clone for Tracked<T> {
-    fn clone(&self) -> Tracked<T> {
-        match self {
-            Tracked::Unmodified(x) => Tracked::Unmodified(x.clone()),
-            Tracked::Modified(x) => Tracked::Modified(x.clone()),
         }
     }
 }

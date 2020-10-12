@@ -284,6 +284,8 @@ impl<B: Backend> Context<B> {
     pub fn clear(&mut self, color: [f32; 4]) -> Result<(), Error> {
         self.devices[0].clear_frame(color, &mut self.command_pools[0].command_buffers)
     }
+
+    pub fn draw(scene: &mut crate::scene::SceneTree) {}
 }
 
 impl<B: Backend> std::ops::Drop for Context<B> {

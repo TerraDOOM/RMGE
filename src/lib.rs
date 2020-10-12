@@ -21,6 +21,10 @@ pub struct Renderer {
     scenetree: SceneTree,
 }
 
+impl Renderer {
+    pub fn submit(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
