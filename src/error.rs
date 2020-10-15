@@ -1,4 +1,4 @@
-use gfx_hal::device;
+use gfx_hal::{self as hal};
 use std::error;
 use std::fmt::{self, Display, Formatter};
 
@@ -7,7 +7,6 @@ pub enum Error {
     InstanceCreationError(gfx_hal::UnsupportedBackend),
     SurfaceCreationError(gfx_hal::window::InitError),
     QueueGroupError(QueueGroupError),
-    DeviceNotFoundError(usize),
     CommandPoolCreationError,
     FenceCreationError,
     SemaphoreCreationError,
@@ -20,18 +19,28 @@ pub enum Error {
     SwapchainError(SwapchainError),
     BufferError(BufferOp, BufferKind),
     MemoryError(MemoryError, MemoryKind),
-    MissingSwapchain,
+    MissingDevice(usize),
+    MissingSwapchain(usize),
+    MissingCommandPool(usize),
+    MissingResourceManager(usize),
+    MissingPipeline(usize),
+    ShaderCreation(ShaderKind, gfx_hal::device::ShaderError),
+    DescriptorSetLayoutCreation,
+    PipelineLayoutCreation,
+    MissingDescriptorSetLayout,
+    PipelineCreation,
+    IOError(std::io::Error),
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use Error::*;
         let s = match self {
-            InstanceCreationError(e) => "Failed creating the instance".to_string(),
-            SurfaceCreationError(e) => "Failed creating the surface".to_string(),
+            InstanceCreationError(_) => "Failed creating the instance".to_string(),
+            SurfaceCreationError(_) => "Failed creating the surface".to_string(),
             QueueGroupError(e) => format!("QueueGroup error: {}", e),
-            DeviceNotFoundError(idx) => format!("Couldn't find the device with index {}", idx),
-            SwapchainError(e) => "Failed creating the swapchain".to_string(),
+            MissingDevice(idx) => format!("Couldn't find the device with index {}", idx),
+            SwapchainError(_) => "Failed creating the swapchain".to_string(),
             CommandPoolCreationError => "Failed creating the command pool".to_string(),
             FenceCreationError => "Failed creating a fence".to_string(),
             SemaphoreCreationError => "Failed creating a semaphore".to_string(),
@@ -51,10 +60,11 @@ impl Display for Error {
             BufferError(op, kind) => format!(
                 "Failed to {} a {} buffer",
                 match op {
-                    BufferOp::Create => "create",
-                    BufferOp::Bind => "bind",
+                    BufferOp::Create(_) => "create",
+                    BufferOp::Bind(_) => "bind",
                 },
                 match kind {
+                    BufferKind::Instance => "instance",
                     BufferKind::Staging => "staging",
                     BufferKind::Index => "index",
                     BufferKind::Matrix => "matrix",
@@ -70,7 +80,7 @@ impl Display for Error {
                     MemoryKind::Image => "image",
                 };
                 match err_kind {
-                    crate::error::MemoryError::AllocationError => {
+                    crate::error::MemoryError::AllocationError(_) => {
                         format!("Failed to allocate {} memory", mem_kind)
                     }
                     crate::error::MemoryError::NoSupportedMemory => {
@@ -81,10 +91,30 @@ impl Display for Error {
                     }
                 }
             }
-            MissingSwapchain => "No swapchain found".to_string(),
+            MissingSwapchain(idx) => format!("Failed to retreive swapchain at index {}", 0),
+            MissingCommandPool(idx) => format!("Failed to retreive command pool at index {}", 0),
+            MissingResourceManager(idx) => {
+                format!("Failed to retreive resource manager at index {}", 0)
+            }
+            MissingPipeline(idx) => format!("Failed to retreive graphics pipeline at index {}", 0),
+            PipelineCreation => "Failed to create pipeline".to_string(),
+            DescriptorSetLayoutCreation => "Failed to create descriptor set layout".to_string(),
+            PipelineLayoutCreation => "Failed to create pipeline layout".to_string(),
+            MissingDescriptorSetLayout => {
+                "Missing descriptor set trying to add pipeline layout".to_string()
+            }
+            ShaderCreation(kind, e) => format!(
+                "Failed to create {} shader ({})",
+                match kind {
+                    ShaderKind::Vertex => "vertex",
+                    ShaderKind::Fragment => "fragment",
+                },
+                e
+            ),
+            IOError(e) => format!("IO error: {}", e),
         };
 
-        writeln!(f, "{}", s)
+        write!(f, "{}", s)
     }
 }
 
@@ -92,9 +122,19 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Error::SurfaceCreationError(e) => Some(e),
+            Error::BufferError(BufferOp::Create(e), _) => Some(e),
+            Error::BufferError(BufferOp::Bind(e), _) => Some(e),
+            Error::MemoryError(MemoryError::AllocationError(e), _) => Some(e),
+            Error::ShaderCreation(_, e) => Some(e),
             _ => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum ShaderKind {
+    Vertex,
+    Fragment,
 }
 
 #[derive(Debug)]
@@ -106,12 +146,12 @@ pub enum FenceOp {
 
 #[derive(Debug)]
 pub enum MemoryError {
-    AllocationError,
+    AllocationError(hal::device::AllocationError),
     NoSupportedMemory,
     MappingError,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum MemoryKind {
     Staging,
     Geometry,
@@ -119,8 +159,9 @@ pub enum MemoryKind {
     Image,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum BufferKind {
+    Instance,
     Quad,
     Matrix,
     Staging,
@@ -130,8 +171,8 @@ pub enum BufferKind {
 
 #[derive(Debug)]
 pub enum BufferOp {
-    Bind,
-    Create,
+    Bind(hal::device::BindError),
+    Create(hal::buffer::CreationError),
 }
 
 #[derive(Debug)]

@@ -40,28 +40,32 @@
 )]
 
 mod device_data;
+mod pipeline_data;
 mod resources;
 mod swapchain_data;
 
+use crate::error::Error;
 use device_data::DeviceData;
+use pipeline_data::PipelineData;
+use resources::ResourceManager;
 use swapchain_data::SwapchainData;
 
-use core::mem::ManuallyDrop;
+use std::mem::{self, ManuallyDrop};
 use std::rc::Rc;
+
+use log::{error, info};
 
 use gfx_hal::{
     adapter::{Adapter, Gpu, PhysicalDevice},
     device::Device as DeviceTrait,
     format::{ChannelType, Format},
-    pool::CommandPoolCreateFlags,
+    pool::{CommandPool, CommandPoolCreateFlags},
     queue::QueueFamily as QueueFamilyTrait,
     window::{Surface, SwapchainConfig},
     Backend, Features, Instance,
 };
 
 use raw_window_handle::HasRawWindowHandle;
-
-use crate::error::Error;
 
 #[derive(Debug)]
 struct CommandData<B: Backend> {
@@ -91,8 +95,9 @@ impl<B: Backend> CommandData<B> {
 
 #[derive(Debug)]
 pub struct Context<B: Backend> {
+    resources: Vec<ResourceManager<B, B::Device>>,
     instance: ManuallyDrop<B::Instance>,
-    surface: B::Surface,
+    surface: ManuallyDrop<B::Surface>,
     adapters: Vec<Adapter<B>>,
     devices: Vec<DeviceData<B>>,
     command_pools: Vec<CommandData<B>>,
@@ -108,6 +113,8 @@ impl<B: Backend> Context<B> {
         context.devices[0].add_image_views(0)?;
         context.devices[0].add_framebuffers(0, 0)?;
         context.add_command_pool(0)?;
+        context.devices[0].add_graphics_pipeline(0, 0)?;
+        context.add_resource_manager(0, 0)?;
 
         Ok(context)
     }
@@ -140,8 +147,9 @@ impl<B: Backend> Context<B> {
 
         Ok(Self {
             instance: ManuallyDrop::new(raw_instance),
-            surface,
+            surface: ManuallyDrop::new(surface),
             adapters,
+            resources: vec![],
             devices: vec![],
             command_pools: vec![],
         })
@@ -171,6 +179,8 @@ impl<B: Backend> Context<B> {
             })
             .ok_or(Error::QueueGroupError(QueueGroupError::QueueGroupNotFound))?;
 
+        info!("Chosen adapter name: {}", self.adapters[index].info.name);
+
         // TODO: Make this good
         let queue_group = queue_groups
             .into_iter()
@@ -195,7 +205,7 @@ impl<B: Backend> Context<B> {
         } = self
             .devices
             .get(device_index)
-            .ok_or(Error::DeviceNotFoundError(device_index))?;
+            .ok_or(Error::MissingDevice(device_index))?;
 
         let surface_capabilities = self
             .surface
@@ -217,6 +227,8 @@ impl<B: Backend> Context<B> {
                 crate::error::SwapchainError::NoPresentMode,
             ))?
         };
+
+        info!("Chosen present mode: {:?}", present_mode);
 
         let preferred_formats = self
             .surface
@@ -266,26 +278,100 @@ impl<B: Backend> Context<B> {
         Ok(())
     }
 
+    fn add_resource_manager(
+        &mut self,
+        device_index: usize,
+        command_pool_index: usize,
+    ) -> Result<(), Error> {
+        let adapter = &self.adapters[self
+            .devices
+            .get_mut(device_index)
+            .ok_or(Error::MissingDevice(device_index))?
+            .adapter_index];
+        let command_pool = self
+            .command_pools
+            .get_mut(command_pool_index)
+            .ok_or(Error::MissingCommandPool(command_pool_index))?;
+
+        let queue = &mut self
+            .devices
+            .get_mut(device_index)
+            .ok_or(Error::MissingDevice(device_index))?
+            .queue
+            .queues[0];
+
+        self.resources.push(ResourceManager::new(
+            command_pool.device.clone(),
+            adapter,
+            &mut command_pool.command_pool,
+            queue,
+        )?);
+
+        Ok(())
+    }
+
     fn add_semaphores(&mut self, device_index: usize, swapchain_index: usize) -> Result<(), Error> {
         self.devices
             .get_mut(device_index)
-            .ok_or(Error::DeviceNotFoundError(device_index))?
+            .ok_or(Error::MissingDevice(device_index))?
             .add_semaphores(swapchain_index)
     }
 
     fn add_command_pool(&mut self, device_index: usize) -> Result<(), Error> {
         unsafe {
-            self.command_pools
-                .push(CommandData::new(&mut self.devices[device_index])?);
+            self.command_pools.push(CommandData::new(
+                self.devices
+                    .get_mut(device_index)
+                    .ok_or(Error::MissingDevice(device_index))?,
+            )?);
         }
         Ok(())
     }
 
     pub fn clear(&mut self, color: [f32; 4]) -> Result<(), Error> {
-        self.devices[0].clear_frame(color, &mut self.command_pools[0].command_buffers)
+        self.devices
+            .get_mut(0)
+            .ok_or(Error::MissingDevice(0))?
+            .clear_frame(
+                color,
+                &mut self
+                    .command_pools
+                    .get_mut(0)
+                    .ok_or(Error::MissingCommandPool(0))?
+                    .command_buffers,
+            )
     }
 
     pub fn draw(scene: &mut crate::scene::SceneTree) {}
+
+    pub fn draw_quad(
+        &mut self,
+        quad: crate::geometry::Quad,
+        clear_color: [f32; 4],
+    ) -> Result<(), Error> {
+        use crate::geometry::{Quad, Vec3};
+
+        self.resources
+            .get_mut(0)
+            .ok_or(Error::MissingResourceManager(0))?
+            .geometry_buffer
+            .add_quad(0, 0, quad)?;
+
+        self.devices
+            .get_mut(0)
+            .ok_or(Error::MissingDevice(0))?
+            .draw(
+                clear_color,
+                &self.resources[0], // at this point we know it exists or we would've returned already
+                &mut self
+                    .command_pools
+                    .get_mut(0)
+                    .ok_or(Error::MissingCommandPool(0))?
+                    .command_buffers,
+            )?;
+
+        Ok(())
+    }
 }
 
 impl<B: Backend> std::ops::Drop for Context<B> {
@@ -297,15 +383,23 @@ impl<B: Backend> std::ops::Drop for Context<B> {
             let _ = device_data.device.wait_idle();
         }
 
-        for command_data in self.command_pools.drain(..) {
+        info!(target: "rmge", "waited for all devices");
+
+        for mut command_data in self.command_pools.drain(..) {
             unsafe {
+                command_data.command_pool.reset(true);
                 command_data
                     .device
                     .destroy_command_pool(command_data.command_pool);
             }
         }
 
+        for mut resource in self.resources.drain(..) {}
+
+        info!(target: "rmge", "destroyed all command queues");
+
         for DeviceData {
+            mut pipelines,
             device,
             swapchains,
             render_passes,
@@ -313,9 +407,14 @@ impl<B: Backend> std::ops::Drop for Context<B> {
             adapter_index: _,
         } in self.devices.drain(..)
         {
+            for data in pipelines.drain(..) {
+                mem::drop(data);
+            }
+
             for render_pass in render_passes {
                 unsafe { device.destroy_render_pass(render_pass) };
             }
+            info!(target: "rmge", "render passes destroyed");
 
             for swapchain_data in swapchains {
                 let SwapchainData {
@@ -335,41 +434,64 @@ impl<B: Backend> std::ops::Drop for Context<B> {
                         device.destroy_fence(fence);
                     }
 
+                    info!(target: "rmge", "fences destroyed");
+
                     for semaphore in available_semaphores.unwrap_or_else(Vec::new) {
                         device.destroy_semaphore(semaphore);
                     }
+
+                    info!(target: "rmge", "available semaphores destroyed");
 
                     for semaphore in finished_semaphores.unwrap_or_else(Vec::new) {
                         device.destroy_semaphore(semaphore);
                     }
 
+                    info!(target: "rmge", "finished semaphores destroyed");
+
                     for image_view in image_views.unwrap_or_else(Vec::new) {
                         device.destroy_image_view(image_view);
                     }
 
-                    for image in backbuffer {
-                        device.destroy_image(image);
-                    }
+                    info!(target: "rmge", "image views destroyed");
+
+                    //for image in backbuffer {
+                    //    device.destroy_image(image);
+                    //}
+
+                    info!(target: "rmge", "backbuffer images destroyed");
 
                     for framebuffer in framebuffers {
                         device.destroy_framebuffer(framebuffer);
                     }
 
+                    info!(target: "rmge", "framebuffers destroyed");
+
                     device.destroy_swapchain(swapchain);
+
+                    info!(target: "rmge", "swapchain destroyed")
                 }
             }
 
+            info!(target: "rmge", "finished dropping swapchains");
+
             match Rc::try_unwrap(device) {
-                Ok(mut dev) => unsafe { ManuallyDrop::drop(&mut dev) },
-                Err(_) => {
-                    use std::io::Write;
-                    // if this fails then everything is probably failing anyway
-                    let _ = writeln!(std::io::stderr(), "There were still alive `Rc`s to device!");
+                Ok(mut dev) => {
+                    unsafe { ManuallyDrop::drop(&mut dev) };
+                    info!(target: "rmge", "dropped device");
+                }
+                Err(rc) => {
+                    // if this happens then everything is probably failing or I forgot to drop something
+                    error!(target: "rmge", "There were still {} alive `Rc`s to device!", Rc::strong_count(&rc));
                 }
             }
         }
         unsafe {
+            self.instance
+                .destroy_surface(ManuallyDrop::into_inner(std::ptr::read(&self.surface)));
+
             ManuallyDrop::drop(&mut self.instance);
         }
+
+        info!(target: "rmge", "dropped instance");
     }
 }

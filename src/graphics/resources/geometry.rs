@@ -2,18 +2,21 @@ use core::mem::{self, ManuallyDrop};
 
 use std::rc::Rc;
 
-use crate::geometry::{Mat4, Quad as Quad3d, Quad2d};
-
 use gfx_hal::{
     adapter::{Adapter, PhysicalDevice},
     buffer::Usage as BufferUsage,
+    command::{CommandBuffer, CommandBufferFlags, Level},
     device::Device,
     memory::{Properties, Segment},
     pool::CommandPool,
+    queue::CommandQueue,
     Backend, MemoryTypeId,
 };
 
 use crate::error::*;
+use crate::geometry::{Mat4, Quad as Quad3d};
+
+use super::buffer::{Buffer, Memory};
 
 static QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
@@ -21,16 +24,18 @@ static QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 const DEFAULT_NUM_MATRICES: u64 = 32;
 const DEFAULT_NUM_QUADS: u64 = 1024;
 
+#[derive(Debug)]
 pub struct GeometryBuffer<B: Backend, D: Device<B>> {
     device: Rc<ManuallyDrop<D>>,
-    max_matrixes: usize,
-    max_quads: usize,
-    allocated_mem: usize,
-    pub local_memory: ManuallyDrop<B::Memory>,
-    pub index_memory: ManuallyDrop<B::Memory>,
-    pub matrix_buffer: ManuallyDrop<B::Buffer>,
-    pub quad_buffer: ManuallyDrop<B::Buffer>,
-    pub quad_index_buffer: ManuallyDrop<B::Buffer>,
+    max_matrices: u64,
+    max_quads: u64,
+    allocated_mem: u64,
+    pub geometry_memory: Memory<B, D>,
+    pub index_memory: Memory<B, D>,
+    pub matrix_buffer: Buffer<B, D>,
+    pub quad_instance_buffer: Buffer<B, D>,
+    pub quad_buffer: Buffer<B, D>,
+    pub quad_index_buffer: Buffer<B, D>,
 }
 
 impl<B: Backend, D: Device<B>> GeometryBuffer<B, D> {
@@ -38,11 +43,13 @@ impl<B: Backend, D: Device<B>> GeometryBuffer<B, D> {
         device: Rc<ManuallyDrop<D>>,
         adapter: &Adapter<B>,
         command_pool: &mut C,
+        command_queue: &mut B::CommandQueue,
     ) -> Result<Self, Error> {
         Self::with_size(
             device,
             adapter,
             command_pool,
+            command_queue,
             DEFAULT_NUM_MATRICES,
             DEFAULT_NUM_QUADS,
         )
@@ -52,155 +59,176 @@ impl<B: Backend, D: Device<B>> GeometryBuffer<B, D> {
         device: Rc<ManuallyDrop<D>>,
         adapter: &Adapter<B>,
         command_pool: &mut C,
+        command_queue: &mut B::CommandQueue,
         num_matrices: u64,
         num_quads: u64,
     ) -> Result<Self, Error> {
         unsafe {
-            let mut matrix_buffer = device
-                .create_buffer(
-                    num_matrices * mem::size_of::<Mat4>() as u64,
-                    BufferUsage::VERTEX,
-                )
-                .map_err(|e| Error::BufferError(BufferOp::Create, BufferKind::Matrix))?;
-            let mut quad_buffer: B::Buffer = match device.create_buffer(
+            let mut matrix_buffer = Buffer::new(
+                device.clone(),
+                num_matrices * mem::size_of::<Mat4>() as u64,
+                BufferUsage::VERTEX,
+            )
+            .map_err(|e| Error::BufferError(BufferOp::Create(e), BufferKind::Matrix))?;
+
+            let mut quad_instance_buffer = Buffer::new(
+                device.clone(),
+                num_quads * mem::size_of::<u32>() as u64,
+                BufferUsage::VERTEX,
+            )
+            .map_err(|e| Error::BufferError(BufferOp::Create(e), BufferKind::Instance))?;
+
+            let mut quad_buffer = Buffer::new(
+                device.clone(),
                 num_quads * mem::size_of::<Quad3d>() as u64,
                 BufferUsage::VERTEX,
-            ) {
-                Ok(buf) => buf,
-                Err(e) => {
-                    device.destroy_buffer(matrix_buffer);
-                    return Err(Error::BufferError(BufferOp::Create, BufferKind::Quad));
-                }
-            };
+            )
+            .map_err(|e| Error::BufferError(BufferOp::Create(e), BufferKind::Quad))?;
 
-            let matrix_requirements = device.get_buffer_requirements(&matrix_buffer);
-            let quad_requirements = device.get_buffer_requirements(&quad_buffer);
+            let mut requirements = device.get_buffer_requirements(&matrix_buffer.buffer);
+            let quad_instance_requirements =
+                device.get_buffer_requirements(&quad_instance_buffer.buffer);
+            let quad_requirements = device.get_buffer_requirements(&quad_buffer.buffer);
 
-            // if it supports the matrix buffer, then we hope it also supports the quad one.
-            let memory_type_id = match adapter
-                .physical_device
-                .memory_properties()
-                .memory_types
-                .iter()
-                .enumerate()
-                .find(|&(id, memory_type)| {
-                    matrix_requirements.type_mask & (1 << id) != 0
-                        && memory_type.properties.contains(Properties::CPU_VISIBLE)
-                })
-                .map(|(id, _)| MemoryTypeId(id))
-            {
-                Some(mem_type_id) => mem_type_id,
-                None => {
-                    device.destroy_buffer(matrix_buffer);
-                    device.destroy_buffer(quad_buffer);
-                    return Err(Error::MemoryError(
-                        MemoryError::NoSupportedMemory,
-                        MemoryKind::Geometry,
-                    ));
-                }
-            };
+            requirements.size += quad_instance_requirements.size + quad_requirements.size;
 
-            let memory = match device.allocate_memory(
-                memory_type_id,
-                matrix_requirements.size + quad_requirements.size,
-            ) {
-                Ok(memory) => memory,
-                Err(e) => {
-                    device.destroy_buffer(matrix_buffer);
-                    device.destroy_buffer(quad_buffer);
-                    return Err(Error::MemoryError(
-                        MemoryError::AllocationError,
-                        MemoryKind::Geometry,
-                    ));
-                }
-            };
+            let geometry_memory = Memory::new(
+                device.clone(),
+                adapter,
+                // CPU_VISIBLE | DEVICE_LOCAL might not always be available, but we hope it is
+                Properties::CPU_VISIBLE | Properties::DEVICE_LOCAL,
+                requirements,
+                MemoryKind::Geometry,
+            )?;
 
-            if let Err(e) = device.bind_buffer_memory(&memory, 0, &mut matrix_buffer) {
-                device.destroy_buffer(matrix_buffer);
-                device.destroy_buffer(quad_buffer);
-                device.free_memory(memory);
-                return Err(Error::BufferError(BufferOp::Bind, BufferKind::Matrix));
-            }
+            matrix_buffer
+                .bind_to_memory(&geometry_memory, 0)
+                .map_err(|e| Error::BufferError(BufferOp::Bind(e), BufferKind::Matrix))?;
 
-            if let Err(e) = device.bind_buffer_memory(
-                &memory,
-                num_matrices * mem::size_of::<Mat4>() as u64,
-                &mut quad_buffer,
-            ) {
-                device.destroy_buffer(matrix_buffer);
-                device.destroy_buffer(quad_buffer);
-                device.free_memory(memory);
-                return Err(Error::BufferError(BufferOp::Bind, BufferKind::Quad));
-            }
+            quad_instance_buffer
+                .bind_to_memory(
+                    &geometry_memory,
+                    num_matrices * mem::size_of::<Mat4>() as u64,
+                )
+                .map_err(|e| Error::BufferError(BufferOp::Bind(e), BufferKind::Quad))?;
 
-            unimplemented!()
+            quad_buffer
+                .bind_to_memory(
+                    &geometry_memory,
+                    num_quads * mem::size_of::<u32>() as u64
+                        + num_matrices * mem::size_of::<Mat4>() as u64,
+                )
+                .map_err(|e| Error::BufferError(BufferOp::Bind(e), BufferKind::Quad))?;
+
+            let (index_memory, quad_index_buffer) = Self::create_index_memory_and_buffer(
+                device.clone(),
+                adapter,
+                command_pool,
+                command_queue,
+            )?;
+
+            Ok(Self {
+                device,
+                max_matrices: num_matrices,
+                max_quads: num_quads,
+                allocated_mem: mem::size_of::<Mat4>() as u64 * num_matrices
+                    + (mem::size_of::<u32>() + mem::size_of::<Quad3d>()) as u64 * num_quads,
+                geometry_memory,
+                index_memory,
+                matrix_buffer,
+                quad_instance_buffer,
+                quad_buffer,
+                quad_index_buffer,
+            })
         }
     }
 
     // separate function to ease the error handling a little bit
-    fn create_index_memory_and_buffer(
-        device: &D,
+    fn create_index_memory_and_buffer<C: CommandPool<B>>(
+        device: Rc<ManuallyDrop<D>>,
         adapter: &Adapter<B>,
-        command_pool: &B::CommandPool,
-    ) -> Result<(B::Memory, B::Buffer), Error> {
+        command_pool: &mut C,
+        command_queue: &mut B::CommandQueue,
+    ) -> Result<(Memory<B, D>, Buffer<B, D>), Error> {
         unsafe {
-            let staging_buffer = device
-                .create_buffer(
-                    mem::size_of_val(&QUAD_INDICES) as u64,
-                    BufferUsage::TRANSFER_DST,
-                )
-                .map_err(|e| Error::BufferError(BufferOp::Create, BufferKind::Staging))?;
+            let mut index_buffer = Buffer::new(
+                device.clone(),
+                mem::size_of::<[u16; 6]>() as u64,
+                BufferUsage::INDEX | BufferUsage::TRANSFER_DST,
+            )
+            .map_err(|e| Error::BufferError(BufferOp::Create(e), BufferKind::Index))?;
 
-            let staging_reqs = device.get_buffer_requirements(&staging_buffer);
+            let reqs = device.get_buffer_requirements(&index_buffer.buffer);
 
-            let memory_type_id = match adapter
-                .physical_device
-                .memory_properties()
-                .memory_types
-                .iter()
-                .enumerate()
-                .find(|&(id, memory_type)| {
-                    staging_reqs.type_mask & (1 << id) != 0
-                        && memory_type.properties.contains(Properties::CPU_VISIBLE)
-                })
-                .map(|(id, _)| MemoryTypeId(id))
-            {
-                Some(mem_type_id) => mem_type_id,
-                None => {
-                    device.destroy_buffer(staging_buffer);
-                    return Err(Error::MemoryError(
-                        MemoryError::NoSupportedMemory,
-                        MemoryKind::Staging,
-                    ));
-                }
-            };
+            let memory = Memory::new(
+                device.clone(),
+                adapter,
+                Properties::DEVICE_LOCAL,
+                reqs,
+                MemoryKind::Index,
+            )?;
 
-            let staging_mem = match device.allocate_memory(memory_type_id, staging_reqs.size) {
-                Ok(mem) => mem,
-                Err(e) => {
-                    device.destroy_buffer(staging_buffer);
-                    return Err(Error::MemoryError(
-                        MemoryError::AllocationError,
-                        MemoryKind::Staging,
-                    ));
-                }
-            };
+            index_buffer
+                .bind_to_memory(&memory, 0)
+                .map_err(|e| Error::BufferError(BufferOp::Bind(e), BufferKind::Index))?;
 
             {
-                let staging_ptr = match device.map_memory(&staging_mem, Segment::ALL) {
-                    Ok(ptr) => ptr as *mut u16,
-                    Err(e) => {
-                        device.destroy_buffer(staging_buffer);
-                        device.free_memory(staging_mem);
-                        return Err(Error::MemoryError(
-                            MemoryError::MappingError,
-                            MemoryKind::Staging,
-                        ));
-                    }
-                };
+                let mut buffer = command_pool.allocate_one(Level::Primary);
+                let fence = device.create_fence(false).expect("fence stuff");
+                device.set_command_buffer_name(&mut buffer, "quad index update buffer");
+                buffer.begin_primary(CommandBufferFlags::ONE_TIME_SUBMIT);
+                buffer.update_buffer(
+                    &index_buffer.buffer,
+                    0,
+                    &mem::transmute::<[u16; 6], [u8; 12]>(QUAD_INDICES),
+                );
+                buffer.finish();
+                command_queue.submit_without_semaphores(Some(&buffer), Some(&fence));
+                device
+                    .wait_for_fence(&fence, u64::MAX)
+                    .expect("more fence stuff");
+                device.destroy_fence(fence);
+
+                buffer.reset(true);
+                command_pool.free(Some(buffer));
             }
-        }
 
+            Ok((memory, index_buffer))
+        }
+    }
+
+    pub fn add_matrix(&mut self, trans: Mat4, index: usize) -> Result<(), Error> {
         unimplemented!()
+    }
+
+    pub fn add_quad(
+        &mut self,
+        index: usize,
+        texture_index: u32,
+        quad: Quad3d,
+    ) -> Result<(), Error> {
+        unsafe {
+            let mapped_segment = Segment {
+                offset: (mem::size_of::<Mat4>() as u64 * self.max_matrices
+                    + mem::size_of::<u32>() as u64 * self.max_quads),
+                size: None,
+            };
+
+            let quad_ptr = self
+                .device
+                .map_memory(&self.geometry_memory.memory, mapped_segment.clone())
+                .expect("this is bad");
+
+            use std::ptr;
+
+            ptr::write((quad_ptr as *mut Quad3d).offset(index as isize), quad);
+
+            self.device
+                .flush_mapped_memory_ranges(Some((&*self.geometry_memory.memory, mapped_segment)))
+                .expect("failed flush");
+            self.device.unmap_memory(&self.geometry_memory.memory);
+
+            Ok(())
+        }
     }
 }

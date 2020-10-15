@@ -18,7 +18,8 @@ fn main() {
         .with_title("quad".to_string());
     let window = wb.build(&event_loop).expect("failed to build window");
 
-    let mut context = Renderer::build(&window, "something").expect("failed to build context");
+    let mut context = Renderer::new(&window, "something").expect("failed to build context");
+
     event_loop.run(move |e, _, control_flow| match e {
         Event::WindowEvent {
             event: WindowEvent::CloseRequested,
@@ -26,8 +27,11 @@ fn main() {
         } => {
             *control_flow = ControlFlow::Exit;
         }
-        _ => context
-            .clear([0.0, 1.0, 0.0, 1.0])
-            .expect("failed to build context"),
+        Event::MainEventsCleared => {
+            context
+                .clear([0.0, 1.0, 0.0, 1.0])
+                .expect("failed to clear screen");
+        }
+        _ => {}
     });
 }

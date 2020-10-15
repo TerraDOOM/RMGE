@@ -44,7 +44,8 @@ fn compute_cache(
 }
 
 impl SceneTree {
-    pub fn new(node: SceneNode) -> SceneTree {
+    pub fn new(mut node: SceneNode) -> SceneTree {
+        node.df_index = Tracked::new(0);
         let mut root = Tracked::new(node);
         SceneTree { root }
     }
@@ -77,6 +78,12 @@ impl SceneTree {
         }
     }
 
+    pub(crate) fn get_cache_and_quad_array(
+        &mut self,
+    ) -> (Vec<&mut Tracked<Mat4>>, Vec<Tracked<Quad>>) {
+        unimplemented!()
+    }
+
     pub fn unset_modifications(&mut self) {
         unset_modification(&mut self.root)
     }
@@ -86,19 +93,12 @@ fn unset_modification(node: &mut Tracked<SceneNode>) {
     for node in node.get_children_mut() {
         unset_modification(node)
     }
-
-    println!(
-        "{}",
-        node.get_children()
-            .map(|x| if x.is_modified() { "*" } else { "_" })
-            .collect::<Vec<_>>()
-            .join("")
-    );
     node.reset();
 }
 
 #[derive(Debug)]
 pub struct SceneNode {
+    df_index: Tracked<usize>,
     // we try to maintain a cache of this "matrix multiplication chain"
     // i.e. the product M_1 * M_2 * ... * M_N where M_1 is the root and
     // M_N is either `transform` or the parent's `transform` (this part is as of
@@ -118,12 +118,10 @@ pub struct SceneNode {
 
 impl SceneNode {
     pub fn new(trans: Mat4) -> Self {
-        let cache = Tracked::new(trans.clone());
-        let transform = Tracked::new(trans);
-
         SceneNode {
-            cache,
-            transform,
+            df_index: Tracked::new(0),
+            cache: Tracked::new(trans),
+            transform: Tracked::new(trans),
             child_count_changed: false,
             quad_count_changed: false,
             children: Vec::new(),
@@ -131,8 +129,10 @@ impl SceneNode {
         }
     }
 
-    pub fn add_child(&mut self, node: SceneNode) {
+    pub fn add_child(&mut self, mut node: SceneNode) {
         self.child_count_changed = true;
+        node.df_index = Tracked::new(self.children.len());
+        assign_df_indices(*node.df_index, node.get_children_mut());
         let mut new = Tracked::new(node);
         self.children.push(new);
     }
@@ -153,15 +153,41 @@ impl SceneNode {
         self.children.iter_mut()
     }
 
-    pub fn get_quads(&self) -> &[Tracked<Quad>] {}
+    pub fn get_quads(&self) -> &[Tracked<Quad>] {
+        &self.quads[..]
+    }
 
-    pub fn get_children(&self) -> &[Tracked<SceneNode>] {}
+    pub fn get_children(&self) -> &[Tracked<SceneNode>] {
+        &self.children[..]
+    }
 
-    pub fn get_quads_mut(&mut self) -> &mut [Tracked<Quad>] {}
+    pub fn get_quads_mut(&mut self) -> &mut [Tracked<Quad>] {
+        &mut self.quads[..]
+    }
 
-    pub fn get_children_mut(&mut self) -> &mut [Tracked<SceneNode>] {}
+    pub fn get_children_mut(&mut self) -> &mut [Tracked<SceneNode>] {
+        &mut self.children[..]
+    }
 
     pub fn cache(&self) -> &Tracked<Mat4> {
         &self.cache
+    }
+
+    pub(crate) fn quads_df_index<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (usize, &'a Tracked<Quad>)> + 'a {
+        let idx = *self.df_index;
+
+        self.quads
+            .iter()
+            .map(move |tracked_quad| (idx, tracked_quad))
+    }
+}
+
+fn assign_df_indices(parent_index: usize, nodes: &mut [Tracked<SceneNode>]) {
+    for (c, node) in nodes.iter_mut().enumerate() {
+        let cur_idx = parent_index + c;
+        *((*node).df_index) = cur_idx;
+        assign_df_indices(cur_idx, node.get_children_mut());
     }
 }
